@@ -131,24 +131,23 @@ class Pecorino::Adapters::PostgresAdapter
       ON CONFLICT (key) DO UPDATE SET
         last_touched_at = EXCLUDED.last_touched_at,
         may_be_deleted_after = EXCLUDED.may_be_deleted_after,
-        level = COALESCE(
-          CASE 
-            -- If CTE has data, use it; otherwise compute from the existing row t
-            -- Inner COALESCE in WHEN: needed to evaluate condition when CTE is empty (NULL <= capacity is NULL, not false)
-            WHEN COALESCE((SELECT level_post_with_uncapped_fillup FROM pre), 
-                          GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup)) <= :capacity THEN
-              -- Inner COALESCE in THEN: ensures we get computed fallback value when CTE is empty, not default to 0.0
-              COALESCE((SELECT level_post_with_uncapped_fillup FROM pre),
-                       GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup))
-            ELSE
-              -- Inner COALESCE in ELSE: ensures we get computed fallback value when CTE is empty, not default to 0.0
-              COALESCE((SELECT level_post FROM pre),
-                       GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)))
-          END,
-          -- Outer COALESCE: Safety net in case entire CASE somehow evaluates to NULL (shouldn't happen with inner COALESCE,
-          -- but protects against NOT NULL constraint violation in edge cases)
-          0.0
-        )
+        level = CASE 
+          -- Race condition: If CTE `pre` is empty (bucket didn't exist when CTE was evaluated),
+          -- COALESCE falls back to computing from existing row `t`
+          WHEN COALESCE(
+            (SELECT level_post_with_uncapped_fillup FROM pre),
+            GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup)
+          ) <= :capacity THEN
+            COALESCE(
+              (SELECT level_post_with_uncapped_fillup FROM pre),
+              GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup)
+            )
+          ELSE
+            COALESCE(
+              (SELECT level_post FROM pre),
+              GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate))
+            )
+        END
       RETURNING
         COALESCE((SELECT level_post FROM pre), 0.0) AS level_before,
         level AS level_after
