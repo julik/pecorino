@@ -132,7 +132,16 @@ class Pecorino::Adapters::PostgresAdapter
         last_touched_at = EXCLUDED.last_touched_at,
         may_be_deleted_after = EXCLUDED.may_be_deleted_after,
         -- Use direct computation from existing row `t` instead of CTE to avoid race condition
-        -- This is more compact and queries the table at conflict time, not at query start
+        -- This is more compact and queries the table at conflict time, not at query start.
+        -- There general shape of a race condition is:
+        -- t1 does an INSERT ... ON CONFLICT and it starts computing the `pre`
+        -- t2 does an INSERT ... ON CONFLICT and gets to insert first - now there is a row
+        -- t1 finishes the `pre` and proceeds to do the INSERT, which then drops down to ON CONFLICT
+        -- since the isolation level is READ COMMITTED. The row inserted by t2 is now visible to t1,
+        -- but it was not visible when `pre` was computed and materialized. But since the value of
+        -- the level would then be taken from `pre`, it would be NULL as `pre` was empty.
+        -- Therefore we do a sub-SELECT at the spot where the substitute value would need to be
+        -- used. There probably are race conditions here as well, TBD
         level = CASE 
           WHEN GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup) <= :capacity THEN
             GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup)
