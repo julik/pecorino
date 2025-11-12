@@ -131,24 +131,16 @@ class Pecorino::Adapters::PostgresAdapter
       ON CONFLICT (key) DO UPDATE SET
         last_touched_at = EXCLUDED.last_touched_at,
         may_be_deleted_after = EXCLUDED.may_be_deleted_after,
+        -- Use direct computation from existing row `t` instead of CTE to avoid race condition
+        -- This is more compact and queries the table at conflict time, not at query start
         level = CASE 
-          -- Race condition: If CTE `pre` is empty (bucket didn't exist when CTE was evaluated),
-          -- COALESCE falls back to computing from existing row `t`
-          WHEN COALESCE(
-            (SELECT level_post_with_uncapped_fillup FROM pre),
+          WHEN GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup) <= :capacity THEN
             GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup)
-          ) <= :capacity THEN
-            COALESCE(
-              (SELECT level_post_with_uncapped_fillup FROM pre),
-              GREATEST(0.0, GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate)) + :fillup)
-            )
           ELSE
-            COALESCE(
-              (SELECT level_post FROM pre),
-              GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate))
-            )
+            GREATEST(0.0, t.level - (EXTRACT(EPOCH FROM (EXCLUDED.last_touched_at - t.last_touched_at)) * :leak_rate))
         END
       RETURNING
+        -- CTE is still used here for level_before (works for both new inserts and updates)
         COALESCE((SELECT level_post FROM pre), 0.0) AS level_before,
         level AS level_after
     SQL
