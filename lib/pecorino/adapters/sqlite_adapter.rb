@@ -99,20 +99,24 @@ class Pecorino::Adapters::SqliteAdapter
     # until the bucket may be deleted.
     may_be_deleted_after_seconds = (capacity.to_f / leak_rate.to_f) * 2.0
 
-    # Execute both INSERT and UPDATE in a single transaction to avoid race conditions
-    # where tokens leak between the INSERT and UPDATE operations
-    with_connection do |connection|
-      connection.transaction do
-        # Calculate now_s once at the start of the transaction
-        now_s = Time.now.to_f
-
-<<<<<<< HEAD
     # Use explicit transaction with separate INSERT and UPDATE statements
     # This ensures proper locking and is more portable across RDBMSes
     # SQLite uses file-level locking and SERIALIZABLE isolation by default,
     # so the transaction itself provides the necessary isolation to prevent race conditions.
     with_connection do |connection|
       connection.transaction do
+        # Calculate now_s once at the start of the transaction
+        now_s = Time.now.to_f
+
+        query_params = {
+          key: key.to_s,
+          capacity: capacity.to_f,
+          delete_after_s: may_be_deleted_after_seconds,
+          leak_rate: leak_rate.to_f,
+          now_s: now_s,
+          fillup: n_tokens.to_f
+        }
+
         # Step 1: Ensure the row exists (this serializes concurrent inserts)
         insert_sql = @model_class.sanitize_sql_array([<<~SQL, query_params])
           INSERT INTO pecorino_leaky_buckets

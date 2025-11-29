@@ -32,7 +32,7 @@ class Pecorino::Adapters::PostgresAdapter
 
     # If the return value of the query is a NULL it means no such bucket exists,
     # so we assume the bucket is empty
-    current_level = with_connection  { |c| c.select_value(sql) } || 0.0
+    current_level = with_connection { |c| c.select_value(sql) } || 0.0
     [current_level, capacity - current_level.abs < 0.01]
   end
 
@@ -85,7 +85,7 @@ class Pecorino::Adapters::PostgresAdapter
     # query as a repeat (since we use "select_one" for the RETURNING bit) and will not call into Postgres
     # correctly, thus the clock_timestamp() value would be frozen between calls. We don't want that here.
     # See https://stackoverflow.com/questions/73184531/why-would-postgres-clock-timestamp-freeze-inside-a-rails-unit-test
-    upserted = with_connection  { |c| c.select_one(sql) }
+    upserted = with_connection { |c| c.select_one(sql) }
     capped_level_after_fillup, at_capacity = upserted.fetch("level"), upserted.fetch("at_capacity")
     [capped_level_after_fillup, at_capacity]
   end
