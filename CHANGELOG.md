@@ -1,3 +1,5 @@
+- Make sure `conditional_fillup` does not make the bucket exceed capacity due to data races / rapid queries.
+
 ## 0.7.4
 
 - Ensure deprecated ActiveRecord::Base.connection is replaced with ActiveRecord::Base.connection_pool.with_connection. This prevents permanent connection checkout

@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class Pecorino::Adapters::PostgresAdapter
+  include Pecorino::Adapters::ConnectionShim
+
   def initialize(model_class)
     @model_class = model_class
   end
@@ -14,7 +16,7 @@ class Pecorino::Adapters::PostgresAdapter
     # The `level` of the bucket is what got stored at `last_touched_at` time, and we can
     # extrapolate from it to see how many tokens have leaked out since `last_touched_at` -
     # we don't need to UPDATE the value in the bucket here
-    sql = @model_class.sanitize_sql_array([<<~SQL, query_params])
+    sql = sanitize_sql_array([<<~SQL, query_params])
       SELECT
         GREATEST(
           0.0, LEAST(
@@ -30,7 +32,7 @@ class Pecorino::Adapters::PostgresAdapter
 
     # If the return value of the query is a NULL it means no such bucket exists,
     # so we assume the bucket is empty
-    current_level = @model_class.connection_pool.with_connection { |connection| connection.uncached { connection.select_value(sql) } } || 0.0
+    current_level = with_connection { |c| c.select_value(sql) } || 0.0
     [current_level, capacity - current_level.abs < 0.01]
   end
 
@@ -49,7 +51,7 @@ class Pecorino::Adapters::PostgresAdapter
       fillup: n_tokens.to_f
     }
 
-    sql = @model_class.sanitize_sql_array([<<~SQL, query_params])
+    sql = sanitize_sql_array([<<~SQL, query_params])
       INSERT INTO pecorino_leaky_buckets AS t
         (key, last_touched_at, may_be_deleted_after, level)
       VALUES
@@ -83,7 +85,7 @@ class Pecorino::Adapters::PostgresAdapter
     # query as a repeat (since we use "select_one" for the RETURNING bit) and will not call into Postgres
     # correctly, thus the clock_timestamp() value would be frozen between calls. We don't want that here.
     # See https://stackoverflow.com/questions/73184531/why-would-postgres-clock-timestamp-freeze-inside-a-rails-unit-test
-    upserted = @model_class.connection_pool.with_connection { |connection| connection.uncached { connection.select_one(sql) } }
+    upserted = with_connection { |c| c.select_one(sql) }
     capped_level_after_fillup, at_capacity = upserted.fetch("level"), upserted.fetch("at_capacity")
     [capped_level_after_fillup, at_capacity]
   end
@@ -103,54 +105,87 @@ class Pecorino::Adapters::PostgresAdapter
       fillup: n_tokens.to_f
     }
 
-    sql = @model_class.sanitize_sql_array([<<~SQL, query_params])
-      WITH pre AS MATERIALIZED (
-        SELECT
-          -- Note the double clamping here. First we clamp the "current level - leak" to not go below zero,
-          -- then we also clamp the above + fillup to not go below 0
-          GREATEST(0.0, 
-              GREATEST(0.0, level - (EXTRACT(EPOCH FROM (clock_timestamp() - last_touched_at)) * :leak_rate)) + :fillup
-          ) AS level_post_with_uncapped_fillup,
-          GREATEST(0.0,
-              level - (EXTRACT(EPOCH FROM (clock_timestamp() - last_touched_at)) * :leak_rate)
-          ) AS level_post
-        FROM pecorino_leaky_buckets
-        WHERE key = :key
-      )
-      INSERT INTO pecorino_leaky_buckets AS t
-        (key, last_touched_at, may_be_deleted_after, level)
-      VALUES
-        (
-          :key,
-          clock_timestamp(),
-          clock_timestamp() + ':delete_after_s second'::interval,
-          GREATEST(0.0,
-            (CASE WHEN :fillup > :capacity THEN 0.0 ELSE :fillup END)
-          )
-        )
-      ON CONFLICT (key) DO UPDATE SET
-        last_touched_at = EXCLUDED.last_touched_at,
-        may_be_deleted_after = EXCLUDED.may_be_deleted_after,
-        level = CASE WHEN (SELECT level_post_with_uncapped_fillup FROM pre) <= :capacity THEN
-          (SELECT level_post_with_uncapped_fillup FROM pre)
-        ELSE
-          (SELECT level_post FROM pre)
-        END
-      RETURNING
-        COALESCE((SELECT level_post FROM pre), 0.0) AS level_before,
-        level AS level_after
-    SQL
+    # Use explicit transaction with separate INSERT and UPDATE statements
+    # This ensures proper locking and is more portable across RDBMSes
+    # READ COMMITTED (PostgreSQL's default) combined with SELECT FOR UPDATE provides row-level locking
+    # that prevents concurrent modifications, which is sufficient for our use case.
+    # SELECT FOR UPDATE locks the row until the transaction commits, preventing race conditions.
+    # This is more performant than SERIALIZABLE or REPEATABLE READ while still preventing race conditions.
+    with_connection do |connection|
+      connection.uncached do
+        connection.transaction(isolation: :read_committed) do
+          # Step 1: Ensure the row exists (this serializes concurrent inserts)
+          insert_sql = @model_class.sanitize_sql_array([<<~SQL, query_params])
+            INSERT INTO pecorino_leaky_buckets
+              (key, last_touched_at, may_be_deleted_after, level)
+            VALUES
+              (
+                :key,
+                clock_timestamp(),
+                clock_timestamp() + ':delete_after_s second'::interval,
+                0.0
+              )
+            ON CONFLICT (key) DO NOTHING
+          SQL
+          connection.execute(insert_sql)
 
-    upserted = @model_class.connection_pool.with_connection { |connection| connection.uncached { connection.select_one(sql) } }
-    level_after = upserted.fetch("level_after")
-    level_before = upserted.fetch("level_before")
-    [level_after, level_after >= capacity, level_after != level_before]
+          # Step 2: Lock the row and read current state
+          # The FOR UPDATE lock will be held until the transaction commits
+          lock_sql = @model_class.sanitize_sql_array([<<~SQL, query_params])
+            SELECT
+              level,
+              last_touched_at,
+              GREATEST(0.0,
+                level - (EXTRACT(EPOCH FROM (clock_timestamp() - last_touched_at)) * :leak_rate)
+              ) AS level_after_leak
+            FROM pecorino_leaky_buckets
+            WHERE key = :key
+            FOR UPDATE
+          SQL
+          current = connection.select_one(lock_sql)
+
+          # If row doesn't exist (shouldn't happen after INSERT, but handle it)
+          if current.nil?
+            level_before = 0.0
+            level_post_with_uncapped_fillup = query_params[:fillup]
+          else
+            level_before = current.fetch("level_after_leak").to_f
+            level_post_with_uncapped_fillup = level_before + query_params[:fillup]
+          end
+
+          # Step 3: Calculate new level conditionally
+          # Ensure level_before is non-negative (should be handled by GREATEST, but be safe)
+          level_before = [level_before, 0.0].max
+
+          new_level = if level_post_with_uncapped_fillup <= query_params[:capacity]
+            [level_post_with_uncapped_fillup, 0.0].max
+          else
+            level_before
+          end
+
+          # Step 4: Update the row (lock is still held from Step 2)
+          update_sql = @model_class.sanitize_sql_array([<<~SQL, query_params.merge(new_level: new_level)])
+            UPDATE pecorino_leaky_buckets
+            SET
+              last_touched_at = clock_timestamp(),
+              may_be_deleted_after = clock_timestamp() + ':delete_after_s second'::interval,
+              level = GREATEST(0.0, :new_level)
+            WHERE key = :key
+            RETURNING level
+          SQL
+
+          updated = connection.select_one(update_sql)
+          level_after = updated.fetch("level").to_f
+          [level_after, level_after >= capacity, level_after != level_before]
+        end
+      end
+    end
   end
 
   def set_block(key:, block_for:)
     raise ArgumentError, "block_for must be positive" unless block_for > 0
     query_params = {key: key.to_s, block_for: block_for.to_f}
-    block_set_query = @model_class.sanitize_sql_array([<<~SQL, query_params])
+    block_set_query = sanitize_sql_array([<<~SQL, query_params])
       INSERT INTO pecorino_blocks AS t
         (key, blocked_until)
       VALUES
@@ -159,20 +194,20 @@ class Pecorino::Adapters::PostgresAdapter
         blocked_until = GREATEST(EXCLUDED.blocked_until, t.blocked_until)
       RETURNING blocked_until
     SQL
-    @model_class.connection_pool.with_connection { |connection| connection.uncached { connection.select_value(block_set_query) } }
+    with_connection { |c| c.select_value(block_set_query) }
   end
 
   def blocked_until(key:)
-    block_check_query = @model_class.sanitize_sql_array([<<~SQL, key])
+    block_check_query = sanitize_sql_array([<<~SQL, key])
       SELECT blocked_until FROM pecorino_blocks WHERE key = ? AND blocked_until >= clock_timestamp() LIMIT 1
     SQL
-    @model_class.connection_pool.with_connection { |connection| connection.uncached { connection.select_value(block_check_query) } }
+    with_connection { |c| c.select_value(block_check_query) }
   end
 
   def prune
-    @model_class.connection_pool.with_connection do |connection|
-      connection.execute("DELETE FROM pecorino_blocks WHERE blocked_until < NOW()")
-      connection.execute("DELETE FROM pecorino_leaky_buckets WHERE may_be_deleted_after < NOW()")
+    with_connection do |c|
+      c.execute("DELETE FROM pecorino_blocks WHERE blocked_until < NOW()")
+      c.execute("DELETE FROM pecorino_leaky_buckets WHERE may_be_deleted_after < NOW()")
     end
   end
 

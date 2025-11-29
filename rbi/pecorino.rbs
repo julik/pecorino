@@ -281,6 +281,8 @@ module Pecorino
     end
 
     class SqliteAdapter
+      include Pecorino::Adapters::ConnectionShim
+
       # sord omit - no YARD type given for "model_class", using untyped
       def initialize: (untyped model_class) -> void
 
@@ -329,9 +331,27 @@ module Pecorino
       # sord omit - no YARD type given for "active_record_schema", using untyped
       # sord omit - no YARD return type given, using untyped
       def create_tables: (untyped active_record_schema) -> untyped
+
+      # sord omit - no YARD type given for "*args", using untyped
+      # sord omit - no YARD return type given, using untyped
+      def sanitize_sql_array: (*untyped args) -> untyped
+
+      # sord omit - no YARD return type given, using untyped
+      def with_connection: () -> untyped
+    end
+
+    module ConnectionShim
+      # sord omit - no YARD type given for "*args", using untyped
+      # sord omit - no YARD return type given, using untyped
+      def sanitize_sql_array: (*untyped args) -> untyped
+
+      # sord omit - no YARD return type given, using untyped
+      def with_connection: () -> untyped
     end
 
     class PostgresAdapter
+      include Pecorino::Adapters::ConnectionShim
+
       # sord omit - no YARD type given for "model_class", using untyped
       def initialize: (untyped model_class) -> void
 
@@ -380,6 +400,13 @@ module Pecorino
       # sord omit - no YARD type given for "active_record_schema", using untyped
       # sord omit - no YARD return type given, using untyped
       def create_tables: (untyped active_record_schema) -> untyped
+
+      # sord omit - no YARD type given for "*args", using untyped
+      # sord omit - no YARD return type given, using untyped
+      def sanitize_sql_array: (*untyped args) -> untyped
+
+      # sord omit - no YARD return type given, using untyped
+      def with_connection: () -> untyped
     end
   end
 
