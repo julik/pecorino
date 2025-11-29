@@ -1,6 +1,6 @@
 # typed: strong
 module Pecorino
-  VERSION = T.let("0.7.3", T.untyped)
+  VERSION = T.let("0.7.4", T.untyped)
 
   # Deletes stale leaky buckets and blocks which have expired. Run this method regularly to
   # avoid accumulating too many unused rows in your tables.
@@ -332,6 +332,8 @@ module Pecorino
     end
 
     class SqliteAdapter
+      include Pecorino::Adapters::ConnectionShim
+
       # sord omit - no YARD type given for "model_class", using untyped
       sig { params(model_class: T.untyped).void }
       def initialize(model_class); end
@@ -392,9 +394,31 @@ module Pecorino
       # sord omit - no YARD return type given, using untyped
       sig { params(active_record_schema: T.untyped).returns(T.untyped) }
       def create_tables(active_record_schema); end
+
+      # sord omit - no YARD type given for "*args", using untyped
+      # sord omit - no YARD return type given, using untyped
+      sig { params(args: T.untyped).returns(T.untyped) }
+      def sanitize_sql_array(*args); end
+
+      # sord omit - no YARD return type given, using untyped
+      sig { returns(T.untyped) }
+      def with_connection; end
+    end
+
+    module ConnectionShim
+      # sord omit - no YARD type given for "*args", using untyped
+      # sord omit - no YARD return type given, using untyped
+      sig { params(args: T.untyped).returns(T.untyped) }
+      def sanitize_sql_array(*args); end
+
+      # sord omit - no YARD return type given, using untyped
+      sig { returns(T.untyped) }
+      def with_connection; end
     end
 
     class PostgresAdapter
+      include Pecorino::Adapters::ConnectionShim
+
       # sord omit - no YARD type given for "model_class", using untyped
       sig { params(model_class: T.untyped).void }
       def initialize(model_class); end
@@ -455,6 +479,15 @@ module Pecorino
       # sord omit - no YARD return type given, using untyped
       sig { params(active_record_schema: T.untyped).returns(T.untyped) }
       def create_tables(active_record_schema); end
+
+      # sord omit - no YARD type given for "*args", using untyped
+      # sord omit - no YARD return type given, using untyped
+      sig { params(args: T.untyped).returns(T.untyped) }
+      def sanitize_sql_array(*args); end
+
+      # sord omit - no YARD return type given, using untyped
+      sig { returns(T.untyped) }
+      def with_connection; end
     end
   end
 
